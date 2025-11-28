@@ -198,9 +198,11 @@ def index():
           <span>检测间隔</span>
           <select id="monitorInterval">
             <option value="5">5秒</option>
-            <option value="10" selected>10秒</option>
+            <option value="10">10秒</option>
             <option value="30">30秒</option>
-            <option value="60">60秒</option>
+            <option value="60" selected>60秒</option>
+            <option value="120">120秒</option>
+            <option value="360">360秒</option>
           </select>
         </label>
         <button id="checkNow" class="secondary">立即检测</button>
@@ -276,7 +278,7 @@ let filtered = [];
 let deviceStatus = {};
 let monitorInterval = null;
 let isMonitoring = false;
-let sortOrder = null; // null, 'asc', 'desc'
+let sortOrder = 'desc'; // null, 'asc', 'desc' - 默认离线在前
 let isLocalAccess = false; // 是否本地访问
 
 function render(list){
@@ -439,7 +441,7 @@ function loadMonitorSettings(){
     const saved = localStorage.getItem('monitorSettings');
     if(saved){
       const settings = JSON.parse(saved);
-      document.getElementById('monitorInterval').value = settings.interval || '10';
+      document.getElementById('monitorInterval').value = settings.interval || '60';
       if(settings.enabled){
         document.getElementById('monitorToggle').checked = true;
         startMonitoring();
@@ -818,8 +820,8 @@ def check_all_devices():
     results = []
     client_ip = request.remote_addr
     
-    # Use ThreadPoolExecutor for concurrent checking
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    # Use ThreadPoolExecutor for concurrent checking (max 10 workers)
+    with ThreadPoolExecutor(max_workers=10) as executor:
         # Submit all tasks
         future_to_device = {executor.submit(check_device_worker, device): device for device in devices}
         
