@@ -43,3 +43,8 @@
 ## 常见问题
 - 跨网段唤醒：需要网络设备允许定向广播或 UDP 广播转发；否则仅同网段广播有效。
 - MAC 格式：支持 `AA:BB:CC:DD:EE:FF` 或无分隔符形式，导入时会自动规范化。
+
+## windows其他功能
+- 将系统托盘集成到新版 app.py （右键菜单：打开界面、切换开机自启、查看日志、退出）。
+- 添加用户级开机自启（ HKCU\Software\Microsoft\Windows\CurrentVersion\Run ）。
+- 集成文件日志 wol.log 并在托盘菜单中提供查看。
