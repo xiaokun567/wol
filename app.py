@@ -277,6 +277,7 @@ let deviceStatus = {};
 let monitorInterval = null;
 let isMonitoring = false;
 let sortOrder = null; // null, 'asc', 'desc'
+let isLocalAccess = false; // 是否本地访问
 
 function render(list){
   const tbody = document.getElementById('tbody');
@@ -285,7 +286,8 @@ function render(list){
     const status = deviceStatus[d.mac] || {online: false, latency: null};
     const statusHtml = d.ip ? renderStatus(status) : '<span style="color:var(--muted); font-size:12px;">无IP</span>';
     const checkBtn = d.ip ? `<button class=\"secondary\" data-action=\"check\" data-mac=\"${d.mac}\" data-ip=\"${d.ip}\">检测</button>` : '';
-    const rdpBtn = d.ip ? `<button class=\"success\" data-action=\"rdp\" data-ip=\"${d.ip}\">远程</button>` : '';
+    // 只有本地访问才显示远程按钮
+    const rdpBtn = (d.ip && isLocalAccess) ? `<button class=\"success\" data-action=\"rdp\" data-ip=\"${d.ip}\">远程</button>` : '';
     
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -393,6 +395,11 @@ async function openRDP(ip){
   } catch(e) {
     alert('打开远程桌面失败: ' + e.message);
   }
+}
+
+function checkLocalAccess(){
+  const hostname = window.location.hostname;
+  isLocalAccess = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
 function startMonitoring(){
@@ -661,6 +668,7 @@ function debounce(fn, delay){
 }
 
 (async function init(){ 
+  checkLocalAccess();
   bindEvents(); 
   await refresh(); 
   loadMonitorSettings();
@@ -686,6 +694,7 @@ def add_device():
     ip = data.get('ip') or None  # 用户 IP，仅用于搜索
     remark = data.get('remark') or None
     broadcast_ip = data.get('broadcast_ip') or None
+    client_ip = request.remote_addr
 
     if not validate_mac(mac):
         return jsonify({'error': 'MAC 地址格式不正确'}), 400
@@ -705,6 +714,7 @@ def add_device():
 
     devices.append(device)
     save_devices(devices)
+    logger.info(f'[{client_ip}] 添加设备: {remark or mac_norm} ({mac_norm})')
     return jsonify({'ok': True, 'device': device})
 
 
@@ -712,10 +722,17 @@ def add_device():
 def delete_device(mac):
     mac_norm = normalize_mac(mac)
     devices = load_devices()
+    client_ip = request.remote_addr
+    
+    # Find device name before deleting
+    device = next((d for d in devices if d.get('mac') == mac_norm), None)
+    device_name = device.get('remark', mac_norm) if device else mac_norm
+    
     new_devices = [d for d in devices if d.get('mac') != mac_norm]
     if len(new_devices) == len(devices):
         return jsonify({'error': '设备不存在'}), 404
     save_devices(new_devices)
+    logger.info(f'[{client_ip}] 删除设备: {device_name} ({mac_norm})')
     return jsonify({'ok': True})
 
 
@@ -737,18 +754,22 @@ def wake_device():
     data = request.get_json(force=True) or {}
     mac = data.get('mac', '')
     port = int(data.get('port') or 9)
+    client_ip = request.remote_addr
 
     if not validate_mac(mac):
         return jsonify({'error': 'MAC 地址格式不正确'}), 400
 
     devices = load_devices()
     dev = next((d for d in devices if d.get('mac') == normalize_mac(mac)), None)
+    device_name = dev.get('remark', mac) if dev else mac
     # 如果配置了广播 IP，则使用；否则用全局广播 255.255.255.255
     broadcast_ip = dev.get('broadcast_ip') if dev and dev.get('broadcast_ip') else '255.255.255.255'
     try:
         send_wol(mac, ip=broadcast_ip, port=port)
+        logger.info(f'[{client_ip}] 执行唤醒: {device_name} ({mac})')
         return jsonify({'ok': True})
     except Exception as e:
+        logger.error(f'[{client_ip}] 唤醒失败: {device_name} ({mac}) - {e}')
         return jsonify({'error': str(e)}), 500
 
 
@@ -759,11 +780,14 @@ def check_device():
     ip = data.get('ip', '')
     port = int(data.get('port') or 3389)
     timeout = float(data.get('timeout') or 1.0)
+    client_ip = request.remote_addr
     
     if not ip:
         return jsonify({'error': 'IP 地址不能为空'}), 400
     
     result = check_port(ip, port, timeout)
+    status = '在线' if result['online'] else '离线'
+    logger.info(f'[{client_ip}] 检测设备: {ip} - {status}')
     return jsonify(result)
 
 
@@ -792,6 +816,7 @@ def check_all_devices():
     """Check online status for all devices using thread pool."""
     devices = load_devices()
     results = []
+    client_ip = request.remote_addr
     
     # Use ThreadPoolExecutor for concurrent checking
     with ThreadPoolExecutor(max_workers=20) as executor:
@@ -811,6 +836,8 @@ def check_all_devices():
                     'latency': None
                 })
     
+    online_count = sum(1 for r in results if r['online'])
+    logger.info(f'[{client_ip}] 批量检测完成: {online_count}/{len(results)} 台在线')
     return jsonify(results)
 
 
@@ -908,6 +935,54 @@ def set_autostart(enable=True):
         return False
 
 
+@app.route('/api/rdp', methods=['POST'])
+def open_rdp_connection():
+    """Open Remote Desktop Connection (only for local access)."""
+    data = request.get_json(force=True) or {}
+    ip = data.get('ip', '')
+    client_ip = request.remote_addr
+    
+    # Check if request is from localhost
+    if client_ip not in ['127.0.0.1', '::1', 'localhost']:
+        logger.warning(f'[{client_ip}] 尝试远程调用RDP被拒绝')
+        return jsonify({'error': '远程桌面功能仅限本地访问'}), 403
+    
+    if not ip:
+        return jsonify({'error': 'IP 地址不能为空'}), 400
+    
+    try:
+        import subprocess
+        import platform
+        
+        system = platform.system()
+        
+        if system == 'Windows':
+            # Windows: 使用 mstsc 命令
+            subprocess.Popen(['mstsc', f'/v:{ip}:3389'])
+            logger.info(f'[{client_ip}] 打开远程桌面: {ip}')
+        elif system == 'Darwin':
+            # macOS: 使用 open 命令打开 rdp:// 协议
+            subprocess.Popen(['open', f'rdp://full%20address=s:{ip}:3389'])
+            logger.info(f'[{client_ip}] 打开远程桌面: {ip}')
+        else:
+            # Linux: 尝试使用 xfreerdp 或 rdesktop
+            try:
+                subprocess.Popen(['xfreerdp', f'/v:{ip}:3389'])
+                logger.info(f'[{client_ip}] 打开远程桌面: {ip}')
+            except FileNotFoundError:
+                try:
+                    subprocess.Popen(['rdesktop', f'{ip}:3389'])
+                    logger.info(f'[{client_ip}] 打开远程桌面: {ip}')
+                except FileNotFoundError:
+                    logger.error(f'[{client_ip}] 未找到远程桌面客户端')
+                    return jsonify({'error': '未找到远程桌面客户端'}), 500
+        
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f'[{client_ip}] 打开远程桌面失败: {ip} - {e}')
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/autostart', methods=['GET'])
 def get_autostart():
     """Get autostart status."""
@@ -919,7 +994,10 @@ def toggle_autostart():
     """Toggle autostart."""
     data = request.get_json(force=True) or {}
     enable = data.get('enable', True)
+    client_ip = request.remote_addr
     success = set_autostart(enable)
+    status = '启用' if enable else '禁用'
+    logger.info(f'[{client_ip}] {status}开机自启')
     return jsonify({'ok': success, 'enabled': get_autostart_status()})
 
 
